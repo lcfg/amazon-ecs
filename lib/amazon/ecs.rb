@@ -27,6 +27,7 @@ require 'cgi'
 require 'hmac-sha2'
 require 'base64'
 require 'openssl'
+require 'exponential_backoff'
 
 module Amazon
   class RequestError < StandardError; end
@@ -117,20 +118,35 @@ module Amazon
     
     # Generic send request to ECS REST service. You have to specify the :operation parameter.
     def self.send_request(opts)
-      opts = self.options.merge(opts) if self.options
+	
+ 	  # setting up backoff options for errorless and overloadless requesting
+	  # numbers taken from amazon API guidelines
+	   backoff = ExponentialBackoff.new(0.2, 30)
+	   backoff.multiplier = 2
+	   backoff.randomize_factor = 0.25
+	
+       opts = self.options.merge(opts) if self.options
       
-      # Include other required options
-      opts[:timestamp] = Time.now.utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+       # Include other required options
+       opts[:timestamp] = Time.now.utc.strftime("%Y-%m-%dT%H:%M:%SZ")
 
-      request_url = prepare_url(opts)
-      log "Request URL: #{request_url}"
+       request_url = prepare_url(opts)
+       log "Request URL: #{request_url}"
       
-      res = Net::HTTP.get_response(URI::parse(request_url))
-      unless res.kind_of? Net::HTTPSuccess
-        raise Amazon::RequestError, "HTTP Response: #{res.code} #{res.message}"
-      end
-      Response.new(res.body)
-    end
+		
+	   
+	   backoff.until_success do |interval, retry_count|
+	     # quit requests after a few failed attempts
+	     Response.new(res.error) if retry_count > 6
+	     res = Net::HTTP.get_response(URI::parse(request_url))
+	
+	       unless res.kind_of? Net::HTTPSuccess
+	         # raise Amazon::RequestError, "HTTP Response: #{res.code} #{res.message}"
+		     print "Failed with: #{res.code} #{res.message}"
+           end
+	     return Response.new(res.body)
+       end
+	end
     
     def self.validate_request(opts) 
       raise Amazon::RequestError, "" if opts[:associate_tag]
